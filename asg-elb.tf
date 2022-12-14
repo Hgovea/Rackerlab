@@ -1,7 +1,8 @@
-# Securityy groups for load balancer
 resource "aws_security_group" "alb-sec-group" {
   name        = "alb-sec-group"
   description = "Security Group for the ELB (ALB)"
+  vpc_id      = aws_vpc.main.id
+
   egress {
     from_port   = 0
     protocol    = "-1"
@@ -25,17 +26,19 @@ resource "aws_security_group" "alb-sec-group" {
 resource "aws_security_group" "asg_sec_group" {
   name        = "asg_sec_group"
   description = "Security Group for the ASG"
+  vpc_id      = aws_vpc.main.id
+
   tags = {
     name = "name"
   }
-  // Allow ALL outbound traffic
+  # Allow ALL outbound traffic
   egress {
     from_port   = 0
     protocol    = "-1" // ALL Protocols
     to_port     = 0
     cidr_blocks = ["0.0.0.0/0"]
   }
-  // Allow Inbound traffic from the ELB Security-Group
+  # Allow Inbound traffic from the ELB Security-Group
   ingress {
     from_port       = 80
     protocol        = "tcp"
@@ -43,57 +46,45 @@ resource "aws_security_group" "asg_sec_group" {
     security_groups = [aws_security_group.alb-sec-group.id] // Allow Inbound traffic from the ALB Sec-Group
   }
 }
-# EC2 template
+
+# Create the Launch configuration so that the ASG can use it to launch EC2 instances
 resource "aws_launch_configuration" "ec2_template" {
   image_id        = var.image_id
   instance_type   = var.flavor
   user_data       = <<-EOF
             #!/bin/bash
-            yum update -y
-            amazon-linux-extras install -y lamp-mariadb10.2-php7.2 php7.2
-            yum install -y httpd mariadb-server
-            systemctl start httpd
-            systemctl enable httpd
-            usermod -a -G apache ec2-user
-            chown -R ec2-user:apache /var/www
-            chmod 2775 /var/www
-            find /var/www -type d -exec chmod 2775 {} \;
-            find /var/www -type f -exec chmod 0664 {} \;
-            echo "<?php phpinfo(); ?>" > /var/www/html/phpinfo.php
+           yum update -y
+           yum install -y httpd
+           systemctl start httpd.service
+           systemctl enable httpd.service
+           EC2_AVAIL_ZONE=$(curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone)
+           echo "<h1>Hello World From Rokkitt at at $(hostname -f) in AZ $EC2_AVAIL_ZONE </h1>" > /var/www/html/index.html
             EOF
-  security_groups = [aws_security_group.asg_sec_group.id]
-  // If the launch_configuration is modified:
-  // --> Create New resources before destroying the old resources
-  lifecycle {
-    create_before_destroy = true
-  }
-}
 
-data "aws_vpc" "default" {
+  }
+ 
+data "aws_vpc" "main" {
   default = true
 }
 
 data "aws_subnet_ids" "default" {
-  vpc_id = data.aws_vpc.default.id
+  vpc_id = data.aws_vpc.main.id
 }
 
 
 
-// Create the ASG
-// https://www.terraform.io/docs/providers/aws/r/autoscaling_group.html
-
+# Create the ASG
 resource "aws_autoscaling_group" "Practice_ASG" {
   max_size                  = 5
   min_size                  = 2
   launch_configuration      = aws_launch_configuration.ec2_template.name
-  health_check_grace_period = 300 // Time after instance comes into service before checking health.
+  health_check_grace_period = 300
 
-  health_check_type = "ELB" // ELB or Ec2 (Default):
-  // EC2 --> Minimal health check - consider the vm unhealthy if the Hypervisor says the vm is completely down
-  // ELB --> Instructs the ASG to use the "target's group" health check
+  health_check_type = "ELB"
+  
+  # We specified all the subnets in the custom vpc
+  vpc_zone_identifier = ["${aws_subnet.public.id}", "${aws_subnet.public2.id}"]
 
-  vpc_zone_identifier = data.aws_subnet_ids.default.ids // A list of subnet IDs to launch resources in.
-  // We specified all the subnets in the default vpc
 
   target_group_arns = [aws_lb_target_group.asg.arn]
 
@@ -107,19 +98,19 @@ resource "aws_autoscaling_group" "Practice_ASG" {
   }
 }
 
-# Create Applicatiion LoadBalancer
+# Create Application LoadBalancer 
 resource "aws_lb" "ELB" {
-  name               = "Rack-alb"
+  name               = "racker-alb"
   load_balancer_type = "application"
 
   # Subnets
-  subnets         =  data.aws_subnet_ids.default.ids
+  subnets         = ["${aws_subnet.public.id}", "${aws_subnet.public2.id}"]
   security_groups = [aws_security_group.alb-sec-group.id]
 }
 
-// https://www.terraform.io/docs/providers/aws/r/lb_listener.html
+# Loadbalancer Listener
 resource "aws_lb_listener" "http" {
-  load_balancer_arn = aws_lb.ELB.arn // Amazon Resource Name (ARN) of the load balancer
+  load_balancer_arn = aws_lb.ELB.arn
   port              = 80
   protocol          = "HTTP"
 
@@ -134,13 +125,13 @@ resource "aws_lb_listener" "http" {
   }
 }
 
-// create a target group for your ASG
+# create a target group for your ASG
 
 resource "aws_lb_target_group" "asg" {
-  name     = "asg-example"
+  name     = "asg-group"
   port     = var.ec2_instance_port
   protocol = "HTTP"
-  vpc_id   = data.aws_vpc.default.id
+  vpc_id   = aws_vpc.main.id
 
   health_check {
     path                = "/"
@@ -153,7 +144,7 @@ resource "aws_lb_target_group" "asg" {
   }
 }
 
-// https://www.terraform.io/docs/providers/aws/r/lb_listener_rule.html
+#LB listener rule
 resource "aws_lb_listener_rule" "asg" {
   listener_arn = aws_lb_listener.http.arn
   priority     = 100
@@ -171,6 +162,9 @@ resource "aws_lb_listener_rule" "asg" {
 
 ## Stopped here --> How does the target group know which EC2 Instances to send requests to?
 ## in (crate ELB (ALB)) note
+
+
+
 
 
 
